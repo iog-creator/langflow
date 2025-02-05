@@ -1,16 +1,32 @@
-import _ from "lodash";
+import { cloneDeep, get } from "lodash";
 import {
   Connection,
   Edge,
   Node,
   OnSelectionChangeParams,
-  ReactFlowInstance,
   ReactFlowJsonObject,
   XYPosition,
 } from "reactflow";
 import ShortUniqueId from "short-unique-id";
-import { specialCharsRegex } from "../constants/constants";
-import { APITemplateType, TemplateVariableType } from "../types/api";
+import getFieldTitle from "../CustomNodes/utils/get-field-title";
+import {
+  INPUT_TYPES,
+  IS_MAC,
+  LANGFLOW_SUPPORTED_TYPES,
+  OUTPUT_TYPES,
+  SUCCESS_BUILD,
+  specialCharsRegex,
+} from "../constants/constants";
+import { downloadFlowsFromDatabase } from "../controllers/API";
+import { DESCRIPTIONS } from "../flow_constants";
+import {
+  APIClassType,
+  APIKindType,
+  APIObjectType,
+  APITemplateType,
+  InputFieldType,
+  OutputFieldType,
+} from "../types/api";
 import {
   FlowType,
   NodeDataType,
@@ -19,65 +35,76 @@ import {
   targetHandleType,
 } from "../types/flow";
 import {
-  cleanEdgesType,
   findLastNodeType,
   generateFlowType,
   unselectAllNodesType,
   updateEdgesHandleIdsType,
 } from "../types/utils/reactflowUtils";
-import { toNormalCase, toTitleCase } from "./utils";
-const uid = new ShortUniqueId({ length: 5 });
+import { createRandomKey, toTitleCase } from "./utils";
+const uid = new ShortUniqueId();
 
-export function cleanEdges({
-  flow: { edges, nodes },
-  updateEdge,
-}: cleanEdgesType) {
-  let newEdges = _.cloneDeep(edges);
+export function checkChatInput(nodes: Node[]) {
+  return nodes.some((node) => node.data.type === "ChatInput");
+}
+
+export function cleanEdges(nodes: NodeType[], edges: Edge[]) {
+  let newEdges = cloneDeep(edges);
   edges.forEach((edge) => {
     // check if the source and target node still exists
     const sourceNode = nodes.find((node) => node.id === edge.source);
     const targetNode = nodes.find((node) => node.id === edge.target);
     if (!sourceNode || !targetNode) {
       newEdges = newEdges.filter((edg) => edg.id !== edge.id);
+      return;
     }
     // check if the source and target handle still exists
-    if (sourceNode && targetNode) {
-      const sourceHandle = edge.sourceHandle; //right
-      const targetHandle = edge.targetHandle; //left
-      if (targetHandle) {
-        const targetHandleObject: targetHandleType =
-          scapeJSONParse(targetHandle);
-        const field = targetHandleObject.fieldName;
-        const id: targetHandleType = {
-          type: targetNode.data.node!.template[field]?.type,
-          fieldName: field,
-          id: targetNode.data.id,
-          inputTypes: targetNode.data.node!.template[field]?.input_types,
-        };
-        if (targetNode.data.node!.template[field]?.proxy) {
-          id.proxy = targetNode.data.node!.template[field]?.proxy;
-        }
-        if (scapedJSONStringfy(id) !== targetHandle) {
-          newEdges = newEdges.filter((e) => e.id !== edge.id);
-        }
+    const sourceHandle = edge.sourceHandle; //right
+    const targetHandle = edge.targetHandle; //left
+    if (targetHandle) {
+      const targetHandleObject: targetHandleType = scapeJSONParse(targetHandle);
+      const field = targetHandleObject.fieldName;
+      const id: targetHandleType = {
+        type: targetNode.data.node!.template[field]?.type,
+        fieldName: field,
+        id: targetNode.data.id,
+        inputTypes: targetNode.data.node!.template[field]?.input_types,
+      };
+      if (targetNode.data.node!.template[field]?.proxy) {
+        id.proxy = targetNode.data.node!.template[field]?.proxy;
       }
-      if (sourceHandle) {
+      if (scapedJSONStringfy(id) !== targetHandle) {
+        newEdges = newEdges.filter((e) => e.id !== edge.id);
+      }
+    }
+    if (sourceHandle) {
+      const parsedSourceHandle = scapeJSONParse(sourceHandle);
+      const name = parsedSourceHandle.name;
+      const output = sourceNode.data.node!.outputs?.find(
+        (output) => output.name === name,
+      );
+      if (output) {
+        const outputTypes =
+          output!.types.length === 1 ? output!.types : [output!.selected!];
+
         const id: sourceHandleType = {
           id: sourceNode.data.id,
-          baseClasses: sourceNode.data.node!.base_classes,
+          name: name,
+          output_types: outputTypes,
           dataType: sourceNode.data.type,
         };
         if (scapedJSONStringfy(id) !== sourceHandle) {
           newEdges = newEdges.filter((e) => e.id !== edge.id);
         }
+      } else {
+        newEdges = newEdges.filter((e) => e.id !== edge.id);
       }
     }
   });
-  updateEdge(newEdges);
+  return newEdges;
 }
 
 export function unselectAllNodes({ updateNodes, data }: unselectAllNodesType) {
-  let newNodes = _.cloneDeep(data);
+  let newNodes = cloneDeep(data);
   newNodes.forEach((node: Node) => {
     node.selected = false;
   });
@@ -86,35 +113,29 @@ export function unselectAllNodes({ updateNodes, data }: unselectAllNodesType) {
 
 export function isValidConnection(
   { source, target, sourceHandle, targetHandle }: Connection,
-  reactFlowInstance: ReactFlowInstance
+  nodes: Node[],
+  edges: Edge[],
 ) {
   const targetHandleObject: targetHandleType = scapeJSONParse(targetHandle!);
   const sourceHandleObject: sourceHandleType = scapeJSONParse(sourceHandle!);
   if (
     targetHandleObject.inputTypes?.some(
-      (n) => n === sourceHandleObject.dataType
+      (n) => n === sourceHandleObject.dataType,
     ) ||
-    sourceHandleObject.baseClasses.some(
+    sourceHandleObject.output_types.some(
       (t) =>
         targetHandleObject.inputTypes?.some((n) => n === t) ||
-        t === targetHandleObject.type
-    ) ||
-    targetHandleObject.type === "str"
+        t === targetHandleObject.type,
+    )
   ) {
-    let targetNode = reactFlowInstance?.getNode(target!)?.data?.node;
+    let targetNode = nodes.find((node) => node.id === target!)?.data?.node;
     if (!targetNode) {
-      if (
-        !reactFlowInstance
-          .getEdges()
-          .find((e) => e.targetHandle === targetHandle)
-      ) {
+      if (!edges.find((e) => e.targetHandle === targetHandle)) {
         return true;
       }
     } else if (
       (!targetNode.template[targetHandleObject.fieldName].list &&
-        !reactFlowInstance
-          .getEdges()
-          .find((e) => e.targetHandle === targetHandle)) ||
+        !edges.find((e) => e.targetHandle === targetHandle)) ||
       targetNode.template[targetHandleObject.fieldName].list
     ) {
       return true;
@@ -124,7 +145,7 @@ export function isValidConnection(
 }
 
 export function removeApiKeys(flow: FlowType): FlowType {
-  let cleanFLow = _.cloneDeep(flow);
+  let cleanFLow = cloneDeep(flow);
   cleanFLow.data!.nodes.forEach((node) => {
     for (const key in node.data.node.template) {
       if (node.data.node.template[key].password) {
@@ -137,9 +158,9 @@ export function removeApiKeys(flow: FlowType): FlowType {
 
 export function updateTemplate(
   reference: APITemplateType,
-  objectToUpdate: APITemplateType
+  objectToUpdate: APITemplateType,
 ): APITemplateType {
-  let clonedObject: APITemplateType = _.cloneDeep(reference);
+  let clonedObject: APITemplateType = cloneDeep(reference);
 
   // Loop through each key in the reference object
   for (const key in clonedObject) {
@@ -158,65 +179,110 @@ export function updateTemplate(
   return clonedObject;
 }
 
+export const processFlows = (DbData: FlowType[], skipUpdate = true) => {
+  let savedComponents: { [key: string]: APIClassType } = {};
+  DbData.forEach((flow: FlowType) => {
+    try {
+      if (!flow.data) {
+        return;
+      }
+      if (flow.data && flow.is_component) {
+        (flow.data.nodes[0].data as NodeDataType).node!.display_name =
+          flow.name;
+        savedComponents[
+          createRandomKey(
+            (flow.data.nodes[0].data as NodeDataType).type,
+            uid.randomUUID(5),
+          )
+        ] = cloneDeep((flow.data.nodes[0].data as NodeDataType).node!);
+        return;
+      }
+      processDataFromFlow(flow, !skipUpdate);
+    } catch (e) {
+      console.log(e);
+    }
+  });
+  return { data: savedComponents, flows: DbData };
+};
+
+export const processDataFromFlow = (flow: FlowType, refreshIds = true) => {
+  let data = flow?.data ? flow.data : null;
+  if (data) {
+    processFlowEdges(flow);
+    //add dropdown option to nodeOutputs
+    processFlowNodes(flow);
+    //add animation to text type edges
+    updateEdges(data.edges);
+    // updateNodes(data.nodes, data.edges);
+    if (refreshIds) updateIds(data); // Assuming updateIds is defined elsewhere
+  }
+  return data;
+};
+
 export function updateIds(
-  newFlow: ReactFlowJsonObject,
-  getNodeId: (type: string) => string
+  { edges, nodes }: { edges: Edge[]; nodes: Node[] },
+  selection?: { edges: Edge[]; nodes: Node[] },
 ) {
   let idsMap = {};
-
-  newFlow.nodes.forEach((node: NodeType) => {
-    // Generate a unique node ID
-    let newId = getNodeId(node.data.node?.flow ? "GroupNode" : node.data.type);
-    idsMap[node.id] = newId;
-    node.id = newId;
-    node.data.id = newId;
-    // Add the new node to the list of nodes in state
-  });
-
-  newFlow.edges.forEach((edge: Edge) => {
-    edge.source = idsMap[edge.source];
-    edge.target = idsMap[edge.target];
-    const sourceHandleObject: sourceHandleType = scapeJSONParse(
-      edge.sourceHandle!
-    );
-    edge.sourceHandle = scapedJSONStringfy({
-      ...sourceHandleObject,
-      id: edge.source,
+  const selectionIds = selection?.nodes.map((n) => n.id);
+  if (nodes) {
+    nodes.forEach((node: NodeType) => {
+      // Generate a unique node ID
+      let newId = getNodeId(node.data.type);
+      if (selection && !selectionIds?.includes(node.id)) {
+        newId = node.id;
+      }
+      idsMap[node.id] = newId;
+      node.id = newId;
+      node.data.id = newId;
+      // Add the new node to the list of nodes in state
     });
-    if (edge.data?.sourceHandle?.id) {
-      edge.data.sourceHandle.id = edge.source;
-    }
-    const targetHandleObject: targetHandleType = scapeJSONParse(
-      edge.targetHandle!
-    );
-    edge.targetHandle = scapedJSONStringfy({
-      ...targetHandleObject,
-      id: edge.target,
+    selection?.nodes.forEach((sNode: NodeType) => {
+      let newId = idsMap[sNode.id];
+      sNode.id = newId;
+      sNode.data.id = newId;
     });
-    if (edge.data?.targetHandle?.id) {
-      edge.data.targetHandle.id = edge.target;
-    }
-    edge.id =
-      "reactflow__edge-" +
-      edge.source +
-      edge.sourceHandle +
-      "-" +
-      edge.target +
-      edge.targetHandle;
-  });
-}
-
-export function buildTweaks(flow: FlowType) {
-  return flow.data!.nodes.reduce((acc, node) => {
-    acc[node.data.id] = {};
-    return acc;
-  }, {});
+  }
+  const concatedEdges = [...edges, ...(selection?.edges ?? [])];
+  if (concatedEdges)
+    concatedEdges.forEach((edge: Edge) => {
+      edge.source = idsMap[edge.source];
+      edge.target = idsMap[edge.target];
+      const sourceHandleObject: sourceHandleType = scapeJSONParse(
+        edge.sourceHandle!,
+      );
+      edge.sourceHandle = scapedJSONStringfy({
+        ...sourceHandleObject,
+        id: edge.source,
+      });
+      if (edge.data?.sourceHandle?.id) {
+        edge.data.sourceHandle.id = edge.source;
+      }
+      const targetHandleObject: targetHandleType = scapeJSONParse(
+        edge.targetHandle!,
+      );
+      edge.targetHandle = scapedJSONStringfy({
+        ...targetHandleObject,
+        id: edge.target,
+      });
+      if (edge.data?.targetHandle?.id) {
+        edge.data.targetHandle.id = edge.target;
+      }
+      edge.id =
+        "reactflow__edge-" +
+        edge.source +
+        edge.sourceHandle +
+        "-" +
+        edge.target +
+        edge.targetHandle;
+    });
+  return idsMap;
 }
 
 export function validateNode(node: NodeType, edges: Edge[]): Array<string> {
   if (!node.data?.node?.template || !Object.keys(node.data.node.template)) {
     return [
-      "We've noticed a potential issue with a node in the flow. Please review it and, if necessary, submit a bug report with your exported flow file. Thank you for your help!",
+      "We've noticed a potential issue with a Component in the flow. Please review it and, if necessary, submit a bug report with your exported flow file. Thank you for your help!",
     ];
   }
 
@@ -224,6 +290,8 @@ export function validateNode(node: NodeType, edges: Edge[]): Array<string> {
     type,
     node: { template },
   } = node.data;
+
+  const displayName = node.data.node.display_name;
 
   return Object.keys(template).reduce((errors: Array<string>, t) => {
     if (
@@ -237,13 +305,11 @@ export function validateNode(node: NodeType, edges: Edge[]): Array<string> {
           (scapeJSONParse(edge.targetHandle!) as targetHandleType).fieldName ===
             t &&
           (scapeJSONParse(edge.targetHandle!) as targetHandleType).id ===
-            node.id
+            node.id,
       )
     ) {
       errors.push(
-        `${type} is missing ${
-          template.display_name || toNormalCase(template[t].name)
-        }.`
+        `${displayName || type} is missing ${getFieldTitle(template, t)}.`,
       );
     } else if (
       template[t].type === "dict" &&
@@ -255,32 +321,56 @@ export function validateNode(node: NodeType, edges: Edge[]): Array<string> {
     ) {
       if (hasDuplicateKeys(template[t].value))
         errors.push(
-          `${type} (${
-            template.display_name || template[t].name
-          }) contains duplicate keys with the same values.`
+          `${displayName || type} (${getFieldTitle(
+            template,
+            t,
+          )}) contains duplicate keys with the same values.`,
         );
       if (hasEmptyKey(template[t].value))
         errors.push(
-          `${type} (${
-            template.display_name || template[t].name
-          }) field must not be empty.`
+          `${displayName || type} (${getFieldTitle(
+            template,
+            t,
+          )}) field must not be empty.`,
         );
     }
     return errors;
   }, [] as string[]);
 }
 
-export function validateNodes(nodes: Node[], edges: Edge[]) {
+export function validateNodes(
+  nodes: Node[],
+  edges: Edge[],
+): // this returns an array of tuples with the node id and the errors
+Array<{ id: string; errors: Array<string> }> {
   if (nodes.length === 0) {
     return [
-      "No nodes found in the flow. Please add at least one node to the flow.",
+      {
+        id: "",
+        errors: [
+          "No components found in the flow. Please add at least one component to the flow.",
+        ],
+      },
     ];
   }
-  return nodes.flatMap((n: NodeType) => validateNode(n, edges));
+  // validateNode(n, edges) returns an array of errors for the node
+  return nodes.map((n) => ({ id: n.id, errors: validateNode(n, edges) }));
+}
+
+export function updateEdges(edges: Edge[]) {
+  if (edges)
+    edges.forEach((edge) => {
+      const targetHandleObject: targetHandleType = scapeJSONParse(
+        edge.targetHandle!,
+      );
+      edge.className = "";
+    });
 }
 
 export function addVersionToDuplicates(flow: FlowType, flows: FlowType[]) {
-  const existingNames = flows.map((item) => item.name);
+  const flowsWithoutUpdatedFlow = flows.filter((f) => f.id !== flow.id);
+
+  const existingNames = flowsWithoutUpdatedFlow.map((item) => item.name);
   let newName = flow.name;
   let count = 1;
 
@@ -296,7 +386,7 @@ export function updateEdgesHandleIds({
   edges,
   nodes,
 }: updateEdgesHandleIdsType): Edge[] {
-  let newEdges = _.cloneDeep(edges);
+  let newEdges = cloneDeep(edges);
   newEdges.forEach((edge) => {
     const sourceNodeId = edge.source;
     const targetNodeId = edge.target;
@@ -318,10 +408,14 @@ export function updateEdgesHandleIds({
       };
     }
     if (source && sourceNode) {
+      const output_types =
+        sourceNode.data.node!.output_types ??
+        sourceNode.data.node!.base_classes!;
       newSource = {
         id: sourceNode.data.id,
-        baseClasses: sourceNode.data.node!.base_classes,
+        output_types,
         dataType: sourceNode.data.type,
+        name: output_types.join(" | "),
       };
     }
     edge.sourceHandle = scapedJSONStringfy(newSource!);
@@ -335,12 +429,81 @@ export function updateEdgesHandleIds({
   return newEdges;
 }
 
+export function updateNewOutput({ nodes, edges }: updateEdgesHandleIdsType) {
+  let newEdges = cloneDeep(edges);
+  let newNodes = cloneDeep(nodes);
+  newEdges.forEach((edge) => {
+    if (edge.sourceHandle && edge.targetHandle) {
+      let newSourceHandle: sourceHandleType = scapeJSONParse(edge.sourceHandle);
+      let newTargetHandle: targetHandleType = scapeJSONParse(edge.targetHandle);
+      const id = newSourceHandle.id;
+      const sourceNodeIndex = newNodes.findIndex((node) => node.id === id);
+      let sourceNode: NodeType | undefined = undefined;
+      if (sourceNodeIndex !== -1) {
+        sourceNode = newNodes[sourceNodeIndex];
+      }
+
+      let intersection;
+      //@ts-ignore
+      if (newSourceHandle.baseClasses) {
+        if (!newSourceHandle.output_types) {
+          if (sourceNode?.data.node!.output_types) {
+            newSourceHandle.output_types = sourceNode?.data.node!.output_types;
+          } else {
+            //@ts-ignore
+            newSourceHandle.output_types = newSourceHandle.baseClasses;
+          }
+        }
+        //@ts-ignore
+        delete newSourceHandle.baseClasses;
+      }
+      if (newTargetHandle.inputTypes && newTargetHandle.inputTypes.length > 0) {
+        //conjuction subtraction
+        intersection = newSourceHandle.output_types.filter((type) =>
+          newTargetHandle.inputTypes!.includes(type),
+        );
+      } else {
+        intersection = newSourceHandle.output_types.filter(
+          (type) => type === newTargetHandle.type,
+        );
+      }
+      const selected = intersection[0];
+      newSourceHandle.name = newSourceHandle.output_types.join(" | ");
+      newSourceHandle.output_types = [selected];
+      if (sourceNode) {
+        if (!sourceNode.data.node?.outputs) {
+          sourceNode.data.node!.outputs = [];
+        }
+        const types =
+          sourceNode.data.node!.output_types ??
+          sourceNode.data.node!.base_classes!;
+        if (
+          !sourceNode.data.node!.outputs.some(
+            (output) => output.selected === selected,
+          )
+        ) {
+          sourceNode.data.node!.outputs.push({
+            types,
+            selected: selected,
+            name: types.join(" | "),
+            display_name: types.join(" | "),
+          });
+        }
+      }
+
+      edge.sourceHandle = scapedJSONStringfy(newSourceHandle);
+      edge.data.sourceHandle = newSourceHandle;
+    }
+  });
+  return { nodes: newNodes, edges: newEdges };
+}
+
 export function handleKeyDown(
   e:
     | React.KeyboardEvent<HTMLInputElement>
     | React.KeyboardEvent<HTMLTextAreaElement>,
   inputValue: string | string[] | null,
-  block: string
+  block: string,
 ) {
   //condition to fix bug control+backspace on Windows/Linux
   if (
@@ -350,9 +513,7 @@ export function handleKeyDown(
       (inputValue === block ||
         inputValue?.charAt(inputValue?.length - 1) === " " ||
         specialCharsRegex.test(inputValue?.charAt(inputValue?.length - 1)))) ||
-    (navigator.userAgent.toUpperCase().includes("MAC") &&
-      e.ctrlKey === true &&
-      e.key === "Backspace")
+    (IS_MAC && e.ctrlKey === true && e.key === "Backspace")
   ) {
     e.preventDefault();
     e.stopPropagation();
@@ -364,16 +525,32 @@ export function handleKeyDown(
   }
 }
 
+export function handleOnlyIntegerInput(
+  event: React.KeyboardEvent<HTMLInputElement>,
+) {
+  if (
+    event.key === "." ||
+    event.key === "-" ||
+    event.key === "," ||
+    event.key === "e" ||
+    event.key === "E" ||
+    event.key === "+"
+  ) {
+    event.preventDefault();
+  }
+}
+
 export function getConnectedNodes(
   edge: Edge,
-  nodes: Array<NodeType>
+  nodes: Array<NodeType>,
 ): Array<NodeType> {
   const sourceId = edge.source;
   const targetId = edge.target;
   return nodes.filter((node) => node.id === targetId || node.id === sourceId);
 }
 
-export function convertObjToArray(singleObject: object | string) {
+export function convertObjToArray(singleObject: object | string, type: string) {
+  if (type !== "dict") return [{ "": "" }];
   if (typeof singleObject === "string") {
     singleObject = JSON.parse(singleObject);
   }
@@ -408,6 +585,8 @@ export function convertArrayToObj(arrayOfObjects) {
 
 export function hasDuplicateKeys(array) {
   const keys = {};
+  // Transforms an empty object into an object array without opening the 'editNode' modal to prevent the flow build from breaking.
+  if (!Array.isArray(array)) array = [{ "": "" }];
   for (const obj of array) {
     for (const key in obj) {
       if (keys[key]) {
@@ -420,6 +599,8 @@ export function hasDuplicateKeys(array) {
 }
 
 export function hasEmptyKey(objArray) {
+  // Transforms an empty object into an array without opening the 'editNode' modal to prevent the flow build from breaking.
+  if (!Array.isArray(objArray)) objArray = [];
   for (const obj of objArray) {
     for (const key in obj) {
       if (obj.hasOwnProperty(key) && key === "") {
@@ -462,8 +643,12 @@ export function checkOldEdgesHandles(edges: Edge[]): boolean {
       !edge.sourceHandle ||
       !edge.targetHandle ||
       !edge.sourceHandle.includes("{") ||
-      !edge.targetHandle.includes("{")
+      !edge.targetHandle.includes("{"),
   );
+}
+
+export function checkOldNodesOutput(nodes: NodeType[]): boolean {
+  return nodes.some((node) => !node.data.node?.outputs);
 }
 
 export function customStringify(obj: any): string {
@@ -485,7 +670,7 @@ export function customStringify(obj: any): string {
 
   const keys = Object.keys(obj).sort();
   const keyValuePairs = keys.map(
-    (key) => `"${key}":${customStringify(obj[key])}`
+    (key) => `"${key}":${customStringify(obj[key])}`,
   );
   return `{${keyValuePairs.join(",")}}`;
 }
@@ -506,51 +691,100 @@ export function getMiddlePoint(nodes: Node[]) {
   return { x: averageX, y: averageY };
 }
 
+export function getNodeId(nodeType: string) {
+  return nodeType + "-" + uid.randomUUID(5);
+}
+
+export function getHandleId(
+  source: string,
+  sourceHandle: string,
+  target: string,
+  targetHandle: string,
+) {
+  return (
+    "reactflow__edge-" + source + sourceHandle + "-" + target + targetHandle
+  );
+}
+
 export function generateFlow(
   selection: OnSelectionChangeParams,
-  reactFlowInstance: ReactFlowInstance,
-  name: string
+  nodes: Node[],
+  edges: Edge[],
+  name: string,
 ): generateFlowType {
-  const newFlowData = reactFlowInstance.toObject();
-
+  const newFlowData = { nodes, edges, viewport: { zoom: 1, x: 0, y: 0 } };
   /*	remove edges that are not connected to selected nodes on both ends
-		in future we can save this edges to when ungrouping reconect to the old nodes
-	*/
-  newFlowData.edges = selection.edges.filter(
+   */
+  newFlowData.edges = edges.filter(
     (edge) =>
       selection.nodes.some((node) => node.id === edge.target) &&
-      selection.nodes.some((node) => node.id === edge.source)
+      selection.nodes.some((node) => node.id === edge.source),
   );
   newFlowData.nodes = selection.nodes;
 
   const newFlow: FlowType = {
     data: newFlowData,
+    is_component: false,
     name: name,
     description: "",
     //generating local id instead of using the id from the server, can change in the future
-    id: uid(),
+    id: uid.randomUUID(5),
   };
   // filter edges that are not connected to selected nodes on both ends
   // using O(n²) aproach because the number of edges is small
   // in the future we can use a better aproach using a set
   return {
     newFlow,
-    removedEdges: selection.edges.filter(
-      (edge) => !newFlowData.edges.includes(edge)
+    removedEdges: edges.filter(
+      (edge) =>
+        (selection.nodes.some((node) => node.id === edge.target) ||
+          selection.nodes.some((node) => node.id === edge.source)) &&
+        newFlowData.edges.every((e) => e.id !== edge.id),
     ),
   };
 }
 
+export function reconnectEdges(groupNode: NodeType, excludedEdges: Edge[]) {
+  if (!groupNode.data.node!.flow) return [];
+  let newEdges = cloneDeep(excludedEdges);
+  const { nodes, edges } = groupNode.data.node!.flow!.data!;
+  const lastNode = findLastNode(groupNode.data.node!.flow!.data!);
+  newEdges = newEdges.filter(
+    (e) => !(nodes.some((n) => n.id === e.source) && e.source !== lastNode?.id),
+  );
+  newEdges.forEach((edge) => {
+    if (lastNode && edge.source === lastNode.id) {
+      edge.source = groupNode.id;
+      let newSourceHandle: sourceHandleType = scapeJSONParse(
+        edge.sourceHandle!,
+      );
+      newSourceHandle.id = groupNode.id;
+      edge.sourceHandle = scapedJSONStringfy(newSourceHandle);
+      edge.data.sourceHandle = newSourceHandle;
+    }
+    if (nodes.some((node) => node.id === edge.target)) {
+      const targetNode = nodes.find((node) => node.id === edge.target)!;
+      const targetHandle: targetHandleType = scapeJSONParse(edge.targetHandle!);
+      const proxy = { id: targetNode.id, field: targetHandle.fieldName };
+      let newTargetHandle: targetHandleType = cloneDeep(targetHandle);
+      newTargetHandle.id = groupNode.id;
+      newTargetHandle.proxy = proxy;
+      edge.target = groupNode.id;
+      newTargetHandle.fieldName = targetHandle.fieldName + "_" + targetNode.id;
+      edge.targetHandle = scapedJSONStringfy(newTargetHandle);
+      edge.data.targetHandle = newTargetHandle;
+    }
+  });
+  return newEdges;
+}
+
 export function filterFlow(
   selection: OnSelectionChangeParams,
-  reactFlowInstance: ReactFlowInstance
+  setNodes: (update: Node[] | ((oldState: Node[]) => Node[])) => void,
+  setEdges: (update: Edge[] | ((oldState: Edge[]) => Edge[])) => void,
 ) {
-  reactFlowInstance.setNodes((nodes) =>
-    nodes.filter((node) => !selection.nodes.includes(node))
-  );
-  reactFlowInstance.setEdges((edges) =>
-    edges.filter((edge) => !selection.edges.includes(edge))
-  );
+  setNodes((nodes) => nodes.filter((node) => !selection.nodes.includes(node)));
+  setEdges((edges) => edges.filter((edge) => !selection.edges.includes(edge)));
 }
 
 export function findLastNode({ nodes, edges }: findLastNodeType) {
@@ -567,63 +801,84 @@ export function updateFlowPosition(NewPosition: XYPosition, flow: FlowType) {
     x: NewPosition.x - middlePoint.x,
     y: NewPosition.y - middlePoint.y,
   };
-  flow.data!.nodes.forEach((node) => {
-    node.position.x += deltaPosition.x;
-    node.position.y += deltaPosition.y;
-  });
+  return {
+    ...flow,
+    data: {
+      ...flow.data!,
+      nodes: flow.data!.nodes.map((node) => ({
+        ...node,
+        position: {
+          x: node.position.x + deltaPosition.x,
+          y: node.position.y + deltaPosition.y,
+        },
+      })),
+    },
+  };
 }
 
 export function concatFlows(
   flow: FlowType,
-  ReactFlowInstance: ReactFlowInstance
+  setNodes: (update: Node[] | ((oldState: Node[]) => Node[])) => void,
+  setEdges: (update: Edge[] | ((oldState: Edge[]) => Edge[])) => void,
 ) {
   const { nodes, edges } = flow.data!;
-  ReactFlowInstance.addNodes(nodes);
-  ReactFlowInstance.addEdges(edges);
+  setNodes((old) => [...old, ...nodes]);
+  setEdges((old) => [...old, ...edges]);
 }
 
 export function validateSelection(
   selection: OnSelectionChangeParams,
-  edges: Edge[]
+  edges: Edge[],
 ): Array<string> {
+  const clonedSelection = cloneDeep(selection);
+  const clonedEdges = cloneDeep(edges);
   //add edges to selection if selection mode selected only nodes
-  if (selection.edges.length === 0) {
-    selection.edges = edges;
+  if (clonedSelection.edges.length === 0) {
+    clonedSelection.edges = clonedEdges;
   }
+
   // get only edges that are connected to the nodes in the selection
   // first creates a set of all the nodes ids
-  let nodesSet = new Set(selection.nodes.map((n) => n.id));
+  let nodesSet = new Set(clonedSelection.nodes.map((n) => n.id));
   // then filter the edges that are connected to the nodes in the set
-  let connectedEdges = selection.edges.filter(
-    (e) => nodesSet.has(e.source) && nodesSet.has(e.target)
+  let connectedEdges = clonedSelection.edges.filter(
+    (e) => nodesSet.has(e.source) && nodesSet.has(e.target),
   );
   // add the edges to the selection
-  selection.edges = connectedEdges;
+  clonedSelection.edges = connectedEdges;
 
   let errorsArray: Array<string> = [];
   // check if there is more than one node
-  if (selection.nodes.length < 2) {
-    errorsArray.push("Please select more than one node");
+  if (clonedSelection.nodes.length < 2) {
+    errorsArray.push("Please select more than one component");
   }
-
+  if (
+    clonedSelection.nodes.some(
+      (node) =>
+        isInputNode(node.data as NodeDataType) ||
+        isOutputNode(node.data as NodeDataType),
+    )
+  ) {
+    errorsArray.push("Select non-input/output components only");
+  }
   //check if there are two or more nodes with free outputs
   if (
-    selection.nodes.filter(
-      (n) => !selection.edges.some((e) => e.source === n.id)
+    clonedSelection.nodes.filter(
+      (n) => !clonedSelection.edges.some((e) => e.source === n.id),
     ).length > 1
   ) {
-    errorsArray.push("Please select only one node with free outputs");
+    errorsArray.push("Select only one component with free outputs");
   }
 
   // check if there is any node that does not have any connection
   if (
-    selection.nodes.some(
+    clonedSelection.nodes.some(
       (node) =>
-        !selection.edges.some((edge) => edge.target === node.id) &&
-        !selection.edges.some((edge) => edge.source === node.id)
+        !clonedSelection.edges.some((edge) => edge.target === node.id) &&
+        !clonedSelection.edges.some((edge) => edge.source === node.id),
     )
   ) {
-    errorsArray.push("Please select only nodes that are connected");
+    errorsArray.push("Select only connected components");
   }
   return errorsArray;
 }
@@ -634,22 +889,14 @@ function updateGroupNodeTemplate(template: APITemplateType) {
     let type = template[key].type;
     let input_types = template[key].input_types;
     if (
-      (type === "str" ||
-        type === "bool" ||
-        type === "float" ||
-        type === "code" ||
-        type === "prompt" ||
-        type === "file" ||
-        type === "int" ||
-        type === "dict" ||
-        type === "NestedDict") &&
+      LANGFLOW_SUPPORTED_TYPES.has(type) &&
       !template[key].required &&
       !input_types
     ) {
       template[key].advanced = true;
     }
     //prevent code fields from showing on the group node
-    if (type === "code") {
+    if (type === "code" && key === "code") {
       template[key].show = false;
     }
   });
@@ -669,11 +916,11 @@ export function mergeNodeTemplates({
 	*/
   let template: APITemplateType = {};
   nodes.forEach((node) => {
-    let nodeTemplate = _.cloneDeep(node.data.node!.template);
+    let nodeTemplate = cloneDeep(node.data.node!.template);
     Object.keys(nodeTemplate)
       .filter((field_name) => field_name.charAt(0) !== "_")
       .forEach((key) => {
-        if (!isHandleConnected(edges, key, nodeTemplate[key], node.id)) {
+        if (!isTargetHandleConnected(edges, key, nodeTemplate[key], node.id)) {
           template[key + "_" + node.id] = nodeTemplate[key];
           template[key + "_" + node.id].proxy = { id: node.id, field: key };
           if (node.type === "groupNode") {
@@ -685,24 +932,23 @@ export function mergeNodeTemplates({
               nodeTemplate[key].display_name
                 ? nodeTemplate[key].display_name
                 : nodeTemplate[key].name
-                ? toTitleCase(nodeTemplate[key].name)
-                : toTitleCase(key);
+                  ? toTitleCase(nodeTemplate[key].name)
+                  : toTitleCase(key);
           }
         }
       });
   });
   return template;
 }
-function isHandleConnected(
+function isTargetHandleConnected(
   edges: Edge[],
   key: string,
-  field: TemplateVariableType,
-  nodeId: string
+  field: InputFieldType,
+  nodeId: string,
 ) {
   /*
 		this function receives a flow and a handleId and check if there is a connection with this handle
 	*/
-  scapedJSONStringfy({ type: field.type, fieldName: key, id: nodeId });
   if (field.proxy) {
     if (
       edges.some(
@@ -714,7 +960,7 @@ function isHandleConnected(
             id: nodeId,
             proxy: { id: field.proxy!.id, field: field.proxy!.field },
             inputTypes: field.input_types,
-          } as targetHandleType)
+          } as targetHandleType),
       )
     ) {
       return true;
@@ -729,7 +975,7 @@ function isHandleConnected(
             fieldName: key,
             id: nodeId,
             inputTypes: field.input_types,
-          } as targetHandleType)
+          } as targetHandleType),
       )
     ) {
       return true;
@@ -752,25 +998,24 @@ export function generateNodeTemplate(Flow: FlowType) {
 
 export function generateNodeFromFlow(
   flow: FlowType,
-  getNodeId: (type: string) => string
+  getNodeId: (type: string) => string,
 ): NodeType {
   const { nodes } = flow.data!;
-  const outputNode = _.cloneDeep(findLastNode(flow.data!));
+  const outputNode = cloneDeep(findLastNode(flow.data!));
   const position = getMiddlePoint(nodes);
-  let data = _.cloneDeep(flow);
-  const id = getNodeId(outputNode?.data.type!);
+  let data = cloneDeep(flow);
+  const id = getNodeId("groupComponent");
   const newGroupNode: NodeType = {
     data: {
       id,
-      type: outputNode?.data.type!,
+      type: "GroupNode",
       node: {
-        output_types: outputNode!.data.node!.output_types,
         display_name: "Group",
         documentation: "",
-        base_classes: outputNode!.data.node!.base_classes,
-        description: "double click to edit description",
+        description: "",
         template: generateNodeTemplate(data),
         flow: data,
+        outputs: generateNodeOutputs(data),
       },
     },
     id,
@@ -780,10 +1025,45 @@ export function generateNodeFromFlow(
   return newGroupNode;
 }
 
+function generateNodeOutputs(flow: FlowType) {
+  const { nodes, edges } = flow.data!;
+  const outputs: Array<OutputFieldType> = [];
+  nodes.forEach((node: NodeType) => {
+    if (node.data.node?.outputs) {
+      const nodeOutputs = node.data.node.outputs;
+      nodeOutputs.forEach((output) => {
+        //filter outputs that are not connected
+        if (
+          !edges.some(
+            (edge) =>
+              edge.source === node.id &&
+              (edge.data.sourceHandle as sourceHandleType).name === output.name,
+          )
+        ) {
+          outputs.push(
+            cloneDeep({
+              ...output,
+              proxy: {
+                id: node.id,
+                name: output.name,
+                nodeDisplayName:
+                  node.data.node!.display_name ?? node.data.node!.name,
+              },
+              name: node.id + "_" + output.name,
+              display_name: output.display_name,
+            }),
+          );
+        }
+      });
+    }
+  });
+  return outputs;
+}
+
 export function connectedInputNodesOnHandle(
   nodeId: string,
   handleId: string,
-  { nodes, edges }: { nodes: NodeType[]; edges: Edge[] }
+  { nodes, edges }: { nodes: NodeType[]; edges: Edge[] },
 ) {
   const connectedNodes: Array<{ name: string; id: string; isGroup: boolean }> =
     [];
@@ -818,213 +1098,185 @@ export function connectedInputNodesOnHandle(
   return connectedNodes;
 }
 
-export function ungroupNode(
-  groupNode: NodeDataType,
-  BaseFlow: ReactFlowJsonObject
+export function updateProxyIdsOnTemplate(
+  template: APITemplateType,
+  idsMap: { [key: string]: string },
 ) {
-  const { template, flow } = groupNode.node!;
-  const gNodes: NodeType[] = flow!.data!.nodes;
-  const gEdges = flow!.data!.edges;
-  //redirect edges to correct proxy node
-  let updatedEdges: Edge[] = [];
-  BaseFlow.edges.forEach((edge) => {
-    let newEdge = _.cloneDeep(edge);
-    if (newEdge.target === groupNode.id) {
-      const targetHandle: targetHandleType = newEdge.data.targetHandle;
-      if (targetHandle.proxy) {
-        let type = targetHandle.type;
-        let field = targetHandle.proxy.field;
-        let proxyId = targetHandle.proxy.id;
-        let inputTypes = targetHandle.inputTypes;
-        let node: NodeType = gNodes.find((n) => n.id === proxyId)!;
-        if (node) {
-          newEdge.target = proxyId;
-          let newTargetHandle: targetHandleType = {
-            fieldName: field,
-            type,
-            id: proxyId,
-            inputTypes: inputTypes,
-          };
-          if (node.data.node?.flow) {
-            newTargetHandle.proxy = {
-              field: node.data.node.template[field].proxy?.field!,
-              id: node.data.node.template[field].proxy?.id!,
-            };
-          }
-          newEdge.data.targetHandle = newTargetHandle;
-          newEdge.targetHandle = scapedJSONStringfy(newTargetHandle);
-        }
-      }
-    }
-    if (newEdge.source === groupNode.id) {
-      const lastNode = _.cloneDeep(findLastNode(flow!.data!));
-      newEdge.source = lastNode!.id;
-      let newSourceHandle: sourceHandleType = scapeJSONParse(
-        newEdge.sourceHandle!
-      );
-      newSourceHandle.id = lastNode!.id;
-      newEdge.data.sourceHandle = newSourceHandle;
-      newEdge.sourceHandle = scapedJSONStringfy(newSourceHandle);
-    }
-    if (edge.target === groupNode.id || edge.source === groupNode.id) {
-      updatedEdges.push(newEdge);
-    }
-  });
-  //update template values
   Object.keys(template).forEach((key) => {
-    let { field, id } = template[key].proxy!;
-    let nodeIndex = gNodes.findIndex((n) => n.id === id);
-    if (nodeIndex !== -1) {
-      let display_name: string;
-      let show = gNodes[nodeIndex].data.node!.template[field].show;
-      let advanced = gNodes[nodeIndex].data.node!.template[field].advanced;
-      if (gNodes[nodeIndex].data.node!.template[field].display_name) {
-        display_name =
-          gNodes[nodeIndex].data.node!.template[field].display_name;
-      } else {
-        display_name = gNodes[nodeIndex].data.node!.template[field].name;
-      }
-      gNodes[nodeIndex].data.node!.template[field] = template[key];
-      gNodes[nodeIndex].data.node!.template[field].show = show;
-      gNodes[nodeIndex].data.node!.template[field].advanced = advanced;
-      gNodes[nodeIndex].data.node!.template[field].display_name = display_name;
+    if (template[key].proxy && idsMap[template[key].proxy!.id]) {
+      template[key].proxy!.id = idsMap[template[key].proxy!.id];
     }
   });
+}
 
-  const nodes = [
-    ...BaseFlow.nodes.filter((n) => n.id !== groupNode.id),
-    ...gNodes,
-  ];
-  const edges = [
-    ...BaseFlow.edges.filter(
-      (e) => e.target !== groupNode.id && e.source !== groupNode.id
-    ),
-    ...gEdges,
-    ...updatedEdges,
-  ];
-  BaseFlow.nodes = nodes;
-  BaseFlow.edges = edges;
+export function updateProxyIdsOnOutputs(
+  outputs: OutputFieldType[] | undefined,
+  idsMap: { [key: string]: string },
+) {
+  if (!outputs) return;
+  outputs.forEach((output) => {
+    if (output.proxy && idsMap[output.proxy.id]) {
+      output.proxy.id = idsMap[output.proxy.id];
+    }
+  });
+}
+
+export function updateEdgesIds(
+  edges: Edge[],
+  idsMap: { [key: string]: string },
+) {
+  edges.forEach((edge) => {
+    let targetHandle: targetHandleType = edge.data.targetHandle;
+    if (targetHandle.proxy && idsMap[targetHandle.proxy!.id]) {
+      targetHandle.proxy!.id = idsMap[targetHandle.proxy!.id];
+    }
+    edge.data.targetHandle = targetHandle;
+    edge.targetHandle = scapedJSONStringfy(targetHandle);
+  });
+}
+
+export function processFlowEdges(flow: FlowType) {
+  if (!flow.data || !flow.data.edges) return;
+  if (checkOldEdgesHandles(flow.data.edges)) {
+    const newEdges = updateEdgesHandleIds(flow.data);
+    flow.data.edges = newEdges;
+  }
+}
+
+export function processFlowNodes(flow: FlowType) {
+  if (!flow.data || !flow.data.nodes) return;
+  if (checkOldNodesOutput(flow.data.nodes)) {
+    const { nodes, edges } = updateNewOutput(flow.data);
+    flow.data.nodes = nodes;
+    flow.data.edges = edges;
+  }
 }
 
 export function expandGroupNode(
-  groupNode: NodeDataType,
-  ReactFlowInstance: ReactFlowInstance
+  id: string,
+  flow: FlowType,
+  template: APITemplateType,
+  nodes: Node[],
+  edges: Edge[],
+  setNodes: (update: Node[] | ((oldState: Node[]) => Node[])) => void,
+  setEdges: (update: Edge[] | ((oldState: Edge[]) => Edge[])) => void,
+  outputs?: OutputFieldType[],
 ) {
-  const { template, flow } = _.cloneDeep(groupNode.node!);
-  const gNodes: NodeType[] = flow?.data?.nodes!;
-  const gEdges = flow!.data!.edges;
-  console.log(gEdges);
-  //redirect edges to correct proxy node
-  let updatedEdges: Edge[] = [];
-  ReactFlowInstance.getEdges().forEach((edge) => {
-    let newEdge = _.cloneDeep(edge);
-    if (newEdge.target === groupNode.id) {
-      const targetHandle: targetHandleType = newEdge.data.targetHandle;
-      if (targetHandle.proxy) {
-        let type = targetHandle.type;
-        let field = targetHandle.proxy.field;
-        let proxyId = targetHandle.proxy.id;
-        let inputTypes = targetHandle.inputTypes;
-        let node: NodeType = gNodes.find((n) => n.id === proxyId)!;
-        if (node) {
-          newEdge.target = proxyId;
-          let newTargetHandle: targetHandleType = {
-            fieldName: field,
-            type,
-            id: proxyId,
-            inputTypes: inputTypes,
-          };
-          if (node.data.node?.flow) {
-            newTargetHandle.proxy = {
-              field: node.data.node.template[field].proxy?.field!,
-              id: node.data.node.template[field].proxy?.id!,
-            };
-          }
-          newEdge.data.targetHandle = newTargetHandle;
-          newEdge.targetHandle = scapedJSONStringfy(newTargetHandle);
+  const idsMap = updateIds(flow!.data!);
+  updateProxyIdsOnTemplate(template, idsMap);
+  let flowEdges = edges;
+  updateEdgesIds(flowEdges, idsMap);
+  const gNodes: NodeType[] = cloneDeep(flow?.data?.nodes!);
+  const gEdges = cloneDeep(flow!.data!.edges);
+  // //redirect edges to correct proxy node
+  // let updatedEdges: Edge[] = [];
+  // flowEdges.forEach((edge) => {
+  //   let newEdge = cloneDeep(edge);
+  //   if (newEdge.target === id) {
+  //     const targetHandle: targetHandleType = newEdge.data.targetHandle;
+  //     if (targetHandle.proxy) {
+  //       let type = targetHandle.type;
+  //       let field = targetHandle.proxy.field;
+  //       let proxyId = targetHandle.proxy.id;
+  //       let inputTypes = targetHandle.inputTypes;
+  //       let node: NodeType = gNodes.find((n) => n.id === proxyId)!;
+  //       if (node) {
+  //         newEdge.target = proxyId;
+  //         let newTargetHandle: targetHandleType = {
+  //           fieldName: field,
+  //           type,
+  //           id: proxyId,
+  //           inputTypes: inputTypes,
+  //         };
+  //         if (node.data.node?.flow) {
+  //           newTargetHandle.proxy = {
+  //             field: node.data.node.template[field].proxy?.field!,
+  //             id: node.data.node.template[field].proxy?.id!,
+  //           };
+  //         }
+  //         newEdge.data.targetHandle = newTargetHandle;
+  //         newEdge.targetHandle = scapedJSONStringfy(newTargetHandle);
+  //       }
+  //     }
+  //   }
+  //   if (newEdge.source === id) {
+  //     const lastNode = cloneDeep(findLastNode(flow!.data!));
+  //     newEdge.source = lastNode!.id;
+  //     let newSourceHandle: sourceHandleType = scapeJSONParse(
+  //       newEdge.sourceHandle!,
+  //     );
+  //     newSourceHandle.id = lastNode!.id;
+  //     newEdge.data.sourceHandle = newSourceHandle;
+  //     newEdge.sourceHandle = scapedJSONStringfy(newSourceHandle);
+  //   }
+  //   if (edge.target === id || edge.source === id) {
+  //     updatedEdges.push(newEdge);
+  //   }
+  // });
+  //update template values
+  Object.keys(template).forEach((key) => {
+    if (template[key].proxy) {
+      let { field, id } = template[key].proxy!;
+      let nodeIndex = gNodes.findIndex((n) => n.id === id);
+      if (nodeIndex !== -1) {
+        let proxy: { id: string; field: string } | undefined;
+        let display_name: string | undefined;
+        let show = gNodes[nodeIndex].data.node!.template[field].show;
+        let advanced = gNodes[nodeIndex].data.node!.template[field].advanced;
+        if (gNodes[nodeIndex].data.node!.template[field].display_name) {
+          display_name =
+            gNodes[nodeIndex].data.node!.template[field].display_name;
+        } else {
+          display_name = gNodes[nodeIndex].data.node!.template[field].name;
+        }
+        if (gNodes[nodeIndex].data.node!.template[field].proxy) {
+          proxy = gNodes[nodeIndex].data.node!.template[field].proxy;
+        }
+        gNodes[nodeIndex].data.node!.template[field] = template[key];
+        gNodes[nodeIndex].data.node!.template[field].show = show;
+        gNodes[nodeIndex].data.node!.template[field].advanced = advanced;
+        gNodes[nodeIndex].data.node!.template[field].display_name =
+          display_name;
+        // keep the nodes selected after ungrouping
+        // gNodes[nodeIndex].selected = false;
+        if (proxy) {
+          gNodes[nodeIndex].data.node!.template[field].proxy = proxy;
+        } else {
+          delete gNodes[nodeIndex].data.node!.template[field].proxy;
         }
       }
     }
-    if (newEdge.source === groupNode.id) {
-      const lastNode = _.cloneDeep(findLastNode(flow!.data!));
-      newEdge.source = lastNode!.id;
-      let newSourceHandle: sourceHandleType = scapeJSONParse(
-        newEdge.sourceHandle!
-      );
-      newSourceHandle.id = lastNode!.id;
-      newEdge.data.sourceHandle = newSourceHandle;
-      newEdge.sourceHandle = scapedJSONStringfy(newSourceHandle);
-    }
-    if (edge.target === groupNode.id || edge.source === groupNode.id) {
-      updatedEdges.push(newEdge);
-    }
   });
-  //update template values
-  Object.keys(template).forEach((key) => {
-    let { field, id } = template[key].proxy!;
-    let nodeIndex = gNodes.findIndex((n) => n.id === id);
+  outputs?.forEach((output) => {
+    let nodeIndex = gNodes.findIndex((n) => n.id === output.proxy!.id);
     if (nodeIndex !== -1) {
-      let proxy: { id: string; field: string } | undefined;
-      let display_name: string;
-      let show = gNodes[nodeIndex].data.node!.template[field].show;
-      let advanced = gNodes[nodeIndex].data.node!.template[field].advanced;
-      if (gNodes[nodeIndex].data.node!.template[field].display_name) {
-        display_name =
-          gNodes[nodeIndex].data.node!.template[field].display_name;
-      } else {
-        display_name = gNodes[nodeIndex].data.node!.template[field].name;
-      }
-      if (gNodes[nodeIndex].data.node!.template[field].proxy) {
-        proxy = gNodes[nodeIndex].data.node!.template[field].proxy;
-      }
-      gNodes[nodeIndex].data.node!.template[field] = template[key];
-      gNodes[nodeIndex].data.node!.template[field].show = show;
-      gNodes[nodeIndex].data.node!.template[field].advanced = advanced;
-      gNodes[nodeIndex].data.node!.template[field].display_name = display_name;
-      gNodes[nodeIndex].selected = false;
-      if (proxy) {
-        gNodes[nodeIndex].data.node!.template[field].proxy = proxy;
-      } else {
-        delete gNodes[nodeIndex].data.node!.template[field].proxy;
+      if (gNodes[nodeIndex].data.node?.outputs) {
+        const nodeOutputIndex = gNodes[nodeIndex].data.node!.outputs!.findIndex(
+          (o) => o.name === output.proxy?.name,
+        );
+        if (nodeOutputIndex !== -1 && output.selected) {
+          gNodes[nodeIndex].data.node!.outputs![nodeOutputIndex].selected =
+            output.selected;
+        }
       }
     }
   });
-
-  const nodes = [
-    ...ReactFlowInstance.getNodes().filter((n) => n.id !== groupNode.id),
-    ...gNodes,
-  ];
-  const edges = [
-    ...ReactFlowInstance.getEdges().filter(
-      (e) => e.target !== groupNode.id && e.source !== groupNode.id
-    ),
+  const filteredNodes = [...nodes.filter((n) => n.id !== id), ...gNodes];
+  const filteredEdges = [
+    ...edges.filter((e) => e.target !== id && e.source !== id),
     ...gEdges,
-    ...updatedEdges,
   ];
-  console.log(edges);
-  ReactFlowInstance.setNodes(nodes);
-  ReactFlowInstance.setEdges(edges);
-}
-
-export function processFlow(FlowObject: ReactFlowJsonObject) {
-  let clonedFLow = _.cloneDeep(FlowObject);
-  clonedFLow.nodes.forEach((node: NodeType) => {
-    if (node.data.node?.flow) {
-      processFlow(node.data.node!.flow!.data!);
-      ungroupNode(node.data, clonedFLow);
-    }
-  });
-  return clonedFLow;
+  setNodes(filteredNodes);
+  setEdges(filteredEdges);
 }
 
 export function getGroupStatus(
   flow: FlowType,
-  ssData: { [key: string]: { valid: boolean; params: string } }
+  ssData: { [key: string]: { valid: boolean; params: string } },
 ) {
-  let status = { valid: true, params: "Built sucessfully ✨" };
+  let status = { valid: true, params: SUCCESS_BUILD };
   const { nodes } = flow.data!;
   const ids = nodes.map((n: NodeType) => n.data.id);
-  ids.forEach((id) => console.log(ssData[id]));
   ids.forEach((id) => {
     if (!ssData[id]) {
       status = ssData[id];
@@ -1035,4 +1287,296 @@ export function getGroupStatus(
     }
   });
   return status;
+}
+
+export function createFlowComponent(
+  nodeData: NodeDataType,
+  version: string,
+): FlowType {
+  const flowNode: FlowType = {
+    data: {
+      edges: [],
+      nodes: [
+        {
+          data: { ...nodeData, node: { ...nodeData.node, official: false } },
+          id: nodeData.id,
+          position: { x: 0, y: 0 },
+          type: "genericNode",
+        },
+      ],
+      viewport: { x: 1, y: 1, zoom: 1 },
+    },
+    description: nodeData.node?.description || "",
+    name: nodeData.node?.display_name || nodeData.type || "",
+    id: nodeData.id || "",
+    is_component: true,
+    last_tested_version: version,
+  };
+  return flowNode;
+}
+
+export function downloadNode(NodeFLow: FlowType) {
+  const element = document.createElement("a");
+  const file = new Blob([JSON.stringify(NodeFLow)], {
+    type: "application/json",
+  });
+  element.href = URL.createObjectURL(file);
+  element.download = `${NodeFLow?.name ?? "node"}.json`;
+  element.click();
+}
+
+export function updateComponentNameAndType(
+  data: any,
+  component: NodeDataType,
+) {}
+
+export function removeFileNameFromComponents(flow: FlowType) {
+  flow.data!.nodes.forEach((node: NodeType) => {
+    Object.keys(node.data.node!.template).forEach((field) => {
+      if (node.data.node?.template[field].type === "file") {
+        node.data.node!.template[field].value = "";
+      }
+    });
+    if (node.data.node?.flow) {
+      removeFileNameFromComponents(node.data.node.flow);
+    }
+  });
+}
+
+export function removeGlobalVariableFromComponents(flow: FlowType) {
+  flow.data!.nodes.forEach((node: NodeType) => {
+    Object.keys(node.data.node!.template).forEach((field) => {
+      if (node.data?.node?.template[field]?.load_from_db) {
+        node.data.node!.template[field].value = "";
+        node.data.node!.template[field].load_from_db = false;
+      }
+    });
+    if (node.data.node?.flow) {
+      removeGlobalVariableFromComponents(node.data.node.flow);
+    }
+  });
+}
+
+export function typesGenerator(data: APIObjectType) {
+  return Object.keys(data)
+    .reverse()
+    .reduce((acc, curr) => {
+      Object.keys(data[curr]).forEach((c: keyof APIKindType) => {
+        acc[c] = curr;
+        // Add the base classes to the accumulator as well.
+        data[curr][c].base_classes?.forEach((b) => {
+          acc[b] = curr;
+        });
+      });
+      return acc;
+    }, {});
+}
+
+export function templatesGenerator(data: APIObjectType) {
+  return Object.keys(data).reduce((acc, curr) => {
+    Object.keys(data[curr]).forEach((c: keyof APIKindType) => {
+      //prevent wrong overwriting of the component template by a group of the same type
+      if (!data[curr][c].flow) acc[c] = data[curr][c];
+    });
+    return acc;
+  }, {});
+}
+
+export function extractFieldsFromComponenents(data: APIObjectType) {
+  const fields = new Set<string>();
+  Object.keys(data).forEach((key) => {
+    Object.keys(data[key]).forEach((kind) => {
+      Object.keys(data[key][kind].template).forEach((field) => {
+        if (
+          data[key][kind].template[field].display_name &&
+          data[key][kind].template[field].show
+        )
+          fields.add(data[key][kind].template[field].display_name!);
+      });
+    });
+  });
+  return fields;
+}
+
+export function downloadFlow(
+  flow: FlowType,
+  flowName: string,
+  flowDescription?: string,
+) {
+  let clonedFlow = cloneDeep(flow);
+  removeFileNameFromComponents(clonedFlow);
+  // create a data URI with the current flow data
+  const jsonString = `data:text/json;chatset=utf-8,${encodeURIComponent(
+    JSON.stringify({
+      ...clonedFlow,
+      name: flowName,
+      description: flowDescription,
+    }),
+  )}`;
+
+  // create a link element and set its properties
+  const link = document.createElement("a");
+  link.href = jsonString;
+  link.download = `${flowName && flowName != "" ? flowName : flow.name}.json`;
+
+  // simulate a click on the link element to trigger the download
+  link.click();
+}
+
+export function downloadFlows() {
+  downloadFlowsFromDatabase().then((flows) => {
+    const jsonString = `data:text/json;chatset=utf-8,${encodeURIComponent(
+      JSON.stringify(flows),
+    )}`;
+
+    // create a link element and set its properties
+    const link = document.createElement("a");
+    link.href = jsonString;
+    link.download = `flows.json`;
+
+    // simulate a click on the link element to trigger the download
+    link.click();
+  });
+}
+
+export function getRandomElement<T>(array: T[]): T {
+  return array[Math.floor(Math.random() * array.length)];
+}
+
+export function getRandomDescription(): string {
+  return getRandomElement(DESCRIPTIONS);
+}
+
+export const createNewFlow = (
+  flowData: ReactFlowJsonObject,
+  flow: FlowType,
+  folderId: string,
+) => {
+  return {
+    description: flow?.description ?? getRandomDescription(),
+    name: flow?.name ? flow.name : "Untitled document",
+    data: flowData,
+    id: "",
+    is_component: flow?.is_component ?? false,
+    folder_id: folderId,
+    endpoint_name: flow?.endpoint_name ?? undefined,
+  };
+};
+
+export function isInputNode(nodeData: NodeDataType): boolean {
+  return INPUT_TYPES.has(nodeData.type);
+}
+
+export function isOutputNode(nodeData: NodeDataType): boolean {
+  return OUTPUT_TYPES.has(nodeData.type);
+}
+
+export function isInputType(type: string): boolean {
+  return INPUT_TYPES.has(type);
+}
+
+export function isOutputType(type: string): boolean {
+  return OUTPUT_TYPES.has(type);
+}
+
+export function updateGroupRecursion(
+  groupNode: NodeType,
+  edges: Edge[],
+  unavailableFields:
+    | {
+        [name: string]: string;
+      }
+    | undefined,
+  globalVariablesEntries: string[] | undefined,
+) {
+  updateGlobalVariables(
+    groupNode.data.node,
+    unavailableFields,
+    globalVariablesEntries,
+  );
+  if (groupNode.data.node?.flow) {
+    groupNode.data.node.flow.data!.nodes.forEach((node) => {
+      if (node.data.node?.flow) {
+        updateGroupRecursion(
+          node,
+          node.data.node.flow.data!.edges,
+          unavailableFields,
+          globalVariablesEntries,
+        );
+      }
+    });
+    let newFlow = groupNode.data.node!.flow;
+    const idsMap = updateIds(newFlow.data!);
+    updateProxyIdsOnTemplate(groupNode.data.node!.template, idsMap);
+    updateProxyIdsOnOutputs(groupNode.data.node.outputs, idsMap);
+    let flowEdges = edges;
+    updateEdgesIds(flowEdges, idsMap);
+  }
+}
+
+export function updateGlobalVariables(
+  node: APIClassType | undefined,
+  unavailableFields:
+    | {
+        [name: string]: string;
+      }
+    | undefined,
+  globalVariablesEntries: string[] | undefined,
+) {
+  if (node && node.template) {
+    Object.keys(node.template).forEach((field) => {
+      if (
+        globalVariablesEntries &&
+        node!.template[field].load_from_db &&
+        !globalVariablesEntries.includes(node!.template[field].value)
+      ) {
+        node!.template[field].value = "";
+        node!.template[field].load_from_db = false;
+      }
+      if (
+        !node!.template[field].load_from_db &&
+        node!.template[field].value === "" &&
+        unavailableFields &&
+        Object.keys(unavailableFields).includes(
+          node!.template[field].display_name ?? "",
+        )
+      ) {
+        node!.template[field].value =
+          unavailableFields[node!.template[field].display_name ?? ""];
+        node!.template[field].load_from_db = true;
+      }
+    });
+  }
+}
+
+export function getGroupOutputNodeId(
+  flow: FlowType,
+  p_name: string,
+  p_node_id: string,
+) {
+  let node: NodeType | undefined = flow.data?.nodes.find(
+    (n) => n.id === p_node_id,
+  );
+  if (!node) return;
+  if (node.data.node?.flow) {
+    let output = node.data.node.outputs?.find((o) => o.name === p_name);
+    if (output && output.proxy) {
+      return getGroupOutputNodeId(
+        node.data.node.flow,
+        output.proxy.name,
+        output.proxy.id,
+      );
+    }
+  }
+  return { id: node.id, outputName: p_name };
+}
+
+export function checkOldComponents({ nodes }: { nodes: any[] }) {
+  return nodes.some(
+    (node) =>
+      node.data.node?.template.code &&
+      (node.data.node?.template.code.value as string).includes(
+        "(CustomComponent):",
+      ),
+  );
 }

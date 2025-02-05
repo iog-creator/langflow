@@ -1,20 +1,44 @@
-import { Page, test } from "@playwright/test";
+import { test } from "@playwright/test";
 
 test.describe("Flow Page tests", () => {
-  async function goToFlowPage(page: Page) {
-    await page.goto("http://localhost:3000/");
-    await page.getByRole("button", { name: "New Project" }).click();
-  }
-
   test("save", async ({ page }) => {
-    await goToFlowPage(page);
-    await page.getByRole("button", { name: "Custom" }).click();
+    await page.goto("/");
+    await page.waitForTimeout(2000);
+
+    let modalCount = 0;
+    try {
+      const modalTitleElement = await page?.getByTestId("modal-title");
+      if (modalTitleElement) {
+        modalCount = await modalTitleElement.count();
+      }
+    } catch (error) {
+      modalCount = 0;
+    }
+
+    while (modalCount === 0) {
+      await page.getByText("New Project", { exact: true }).click();
+      await page.waitForTimeout(5000);
+      modalCount = await page.getByTestId("modal-title")?.count();
+    }
+
+    await page.getByTestId("blank-flow").click();
+    await page.waitForSelector('[data-testid="extended-disclosure"]', {
+      timeout: 30000,
+    });
+    await page.getByTestId("extended-disclosure").click();
+    await page.getByPlaceholder("Search").click();
+    await page.getByPlaceholder("Search").fill("custom");
+
+    await page.waitForTimeout(1000);
+
     await page
-      .locator("div")
-      .filter({ hasText: /^Custom Component$/ })
-      .nth(4)
-      .dragTo(page.locator(".react-flow__pane"));
-    await page.locator("div:nth-child(4) > .extra-side-bar-buttons").click();
-    await page.locator(".success-alert").click();
+      .locator('//*[@id="helpersCustom Component"]')
+      .dragTo(page.locator('//*[@id="react-flow-id"]'));
+    await page.mouse.up();
+    await page.mouse.down();
+    await page.getByTitle("fit view").click();
+    await page.getByTitle("zoom out").click();
+    await page.getByTitle("zoom out").click();
+    await page.getByTitle("zoom out").click();
   });
 });

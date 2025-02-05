@@ -1,21 +1,25 @@
 import { useEffect } from "react";
-import { FloatComponentType } from "../../types/components";
-import { handleKeyDown } from "../../utils/reactflowUtils";
+import { IntComponentType } from "../../types/components";
+import {
+  handleKeyDown,
+  handleOnlyIntegerInput,
+} from "../../utils/reactflowUtils";
 import { Input } from "../ui/input";
 
 export default function IntComponent({
   value,
   onChange,
+  rangeSpec,
   disabled,
   editNode = false,
   id = "",
-}: FloatComponentType): JSX.Element {
-  const min = 0;
+}: IntComponentType): JSX.Element {
+  const min = -Infinity;
 
   // Clear component state
   useEffect(() => {
-    if (disabled) {
-      onChange("");
+    if (disabled && value !== "") {
+      onChange("", undefined, true);
     }
   }, [disabled, onChange]);
 
@@ -24,27 +28,13 @@ export default function IntComponent({
       <Input
         id={id}
         onKeyDown={(event) => {
-          if (
-            event.key !== "Backspace" &&
-            event.key !== "Enter" &&
-            event.key !== "Delete" &&
-            event.key !== "ArrowLeft" &&
-            event.key !== "ArrowRight" &&
-            event.key !== "Control" &&
-            event.key !== "Meta" &&
-            event.key !== "Shift" &&
-            event.key !== "c" &&
-            event.key !== "v" &&
-            event.key !== "a" &&
-            !/^[-]?\d*$/.test(event.key)
-          ) {
-            event.preventDefault();
-          }
-          handleKeyDown(event, value, "0");
+          handleOnlyIntegerInput(event);
+          handleKeyDown(event, value, "");
         }}
         type="number"
-        step="1"
-        min={min}
+        step={rangeSpec?.step ?? 1}
+        min={rangeSpec?.min ?? min}
+        max={rangeSpec?.max ?? undefined}
         onInput={(event: React.ChangeEvent<HTMLInputElement>) => {
           if (Number(event.target.value) < min) {
             event.target.value = min.toString();
@@ -57,6 +47,7 @@ export default function IntComponent({
         onChange={(event) => {
           onChange(event.target.value);
         }}
+        data-testid={id}
       />
     </div>
   );

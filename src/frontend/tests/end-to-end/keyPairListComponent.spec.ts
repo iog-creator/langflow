@@ -1,22 +1,53 @@
 import { expect, test } from "@playwright/test";
 
 test("KeypairListComponent", async ({ page }) => {
-  await page.goto("http://localhost:3000/");
+  await page.goto("/");
   await page.waitForTimeout(2000);
 
-  await page.locator('//*[@id="new-project-btn"]').click();
-  await page.waitForTimeout(2000);
+  let modalCount = 0;
+  try {
+    const modalTitleElement = await page?.getByTestId("modal-title");
+    if (modalTitleElement) {
+      modalCount = await modalTitleElement.count();
+    }
+  } catch (error) {
+    modalCount = 0;
+  }
 
+  while (modalCount === 0) {
+    await page.getByText("New Project", { exact: true }).click();
+    await page.waitForTimeout(5000);
+    modalCount = await page.getByTestId("modal-title")?.count();
+  }
+  await page.waitForSelector('[data-testid="blank-flow"]', {
+    timeout: 30000,
+  });
+  await page.getByTestId("blank-flow").click();
+  await page.waitForSelector('[data-testid="extended-disclosure"]', {
+    timeout: 30000,
+  });
+  await page.getByTestId("extended-disclosure").click();
   await page.getByPlaceholder("Search").click();
-  await page.getByPlaceholder("Search").fill("csv");
+  await page.getByPlaceholder("Search").fill("amazon bedrock");
 
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(1000);
 
   await page
-    .locator('//*[@id="sideCSVLoader"]')
+    .getByTestId("modelsAmazon Bedrock")
     .dragTo(page.locator('//*[@id="react-flow-id"]'));
   await page.mouse.up();
   await page.mouse.down();
+  await page.getByTitle("fit view").click();
+  await page.getByTitle("zoom out").click();
+  await page.getByTitle("zoom out").click();
+  await page.getByTitle("zoom out").click();
+
+  await page.getByTestId("more-options-modal").click();
+  await page.getByTestId("edit-button-modal").click();
+
+  await page.getByTestId("showmodel_kwargs").click();
+  expect(await page.getByTestId("showmodel_kwargs").isChecked()).toBeTruthy();
+  await page.getByText("Close").last().click();
 
   await page.locator('//*[@id="keypair0"]').click();
   await page.locator('//*[@id="keypair0"]').fill("testtesttesttest");
@@ -25,126 +56,76 @@ test("KeypairListComponent", async ({ page }) => {
     .locator('//*[@id="keypair100"]')
     .fill("test test test test test test");
 
-  const valueWithSpace = await page
-    .locator('//*[@id="keypair100"]')
-    .inputValue();
+  await page.getByTestId("div-generic-node").click();
+
+  const valueWithSpace = await page.getByTestId("keypair100").inputValue();
+  await page.getByTestId("div-generic-node").click();
 
   if (valueWithSpace !== "test test test test test test") {
     expect(false).toBeTruthy();
   }
 
   const plusButtonLocatorNode = page.locator('//*[@id="plusbtn0"]');
-  const elementCountNode = await plusButtonLocatorNode.count();
+  const elementCountNode = await plusButtonLocatorNode?.count();
   if (elementCountNode > 0) {
     await plusButtonLocatorNode.click();
   }
+  await page.getByTestId("div-generic-node").click();
 
-  await page.locator('//*[@id="keypair1"]').click();
-  await page.locator('//*[@id="keypair1"]').fill("testtesttesttest1");
-  await page.locator('//*[@id="keypair101"]').click();
-  await page.locator('//*[@id="keypair101"]').fill("testtesttesttesttesttest1");
-  await page.locator('//*[@id="plusbtn1"]').click();
+  await page.locator('//*[@id="keypair0"]').click();
+  await page.locator('//*[@id="keypair0"]').fill("testtesttesttest1");
+  await page.getByTestId("div-generic-node").click();
 
-  await page.locator('//*[@id="keypair2"]').click();
-  await page.locator('//*[@id="keypair2"]').fill("testtesttesttest2");
-  await page.locator('//*[@id="keypair102"]').click();
-  await page.locator('//*[@id="keypair102"]').fill("testtesttesttesttesttest2");
+  const keyPairVerification = page.locator('//*[@id="keypair100"]');
+  const elementKeyCount = await keyPairVerification?.count();
 
-  await page.locator('//*[@id="minusbtn1"]').click();
-
-  const keyPairVerification = page.locator('//*[@id="keypair102"]');
-  const elementKeyCount = await keyPairVerification.count();
-
-  if (elementKeyCount === 0) {
+  if (elementKeyCount === 1) {
     expect(true).toBeTruthy();
   } else {
     expect(false).toBeTruthy();
   }
 
-  await page
-    .locator(
-      '//*[@id="react-flow-id"]/div[1]/div[1]/div[1]/div/div[2]/div/div/div[1]/div/div[1]/div'
-    )
-    .click();
-  await page.locator('//*[@id="advancedIcon"]').click();
-  await page.locator('//*[@id="editAdvancedBtn"]').click();
+  await page.getByTestId("more-options-modal").click();
+  await page.getByTestId("edit-button-modal").click();
 
-  await page.locator('//*[@id="showfile_path"]').click();
+  await page.locator('//*[@id="showcredentials_profile_name"]').click();
   expect(
-    await page.locator('//*[@id="showfile_path"]').isChecked()
+    await page.locator('//*[@id="showcredentials_profile_name"]').isChecked(),
   ).toBeFalsy();
-  await page.locator('//*[@id="showmetadata"]').click();
-  expect(await page.locator('//*[@id="showmetadata"]').isChecked()).toBeFalsy();
-  await page.locator('//*[@id="saveChangesBtn"]').click();
+  await page.getByText("Close").last().click();
 
   const plusButtonLocator = page.locator('//*[@id="plusbtn0"]');
-  const elementCount = await plusButtonLocator.count();
+  const elementCount = await plusButtonLocator?.count();
   if (elementCount === 0) {
     expect(true).toBeTruthy();
+    await page.getByTestId("div-generic-node").click();
 
-    await page
-      .locator(
-        '//*[@id="react-flow-id"]/div[1]/div[1]/div[1]/div/div[2]/div/div/div[1]/div/div[1]/div'
-      )
-      .click();
-    await page.locator('//*[@id="advancedIcon"]').click();
-    await page.locator('//*[@id="editAdvancedBtn"]').click();
+    await page.getByTestId("more-options-modal").click();
+    await page.getByTestId("edit-button-modal").click();
 
-    await page.locator('//*[@id="showfile_path"]').click();
+    await page.locator('//*[@id="showcredentials_profile_name"]').click();
     expect(
-      await page.locator('//*[@id="showfile_path"]').isChecked()
-    ).toBeTruthy();
-    await page.locator('//*[@id="showmetadata"]').click();
-    expect(
-      await page.locator('//*[@id="showmetadata"]').isChecked()
+      await page.locator('//*[@id="showcredentials_profile_name"]').isChecked(),
     ).toBeTruthy();
 
-    await page.locator('//*[@id="keypair0"]').click();
-    await page.locator('//*[@id="keypair0"]').fill("testtesttesttest");
-    await page.locator('//*[@id="keypair100"]').click();
-    await page
-      .locator('//*[@id="keypair100"]')
-      .fill("test test test test test test");
+    await page.locator('//*[@id="editNodekeypair0"]').click();
+    await page.locator('//*[@id="editNodekeypair0"]').fill("testtesttesttest");
 
-    const plusButtonLocator = page.locator('//*[@id="plusbtn0"]');
-    const elementCount = await plusButtonLocator.count();
-    if (elementCount > 0) {
-      await plusButtonLocator.click();
-    }
+    const keyPairVerification = page.locator('//*[@id="editNodekeypair0"]');
+    const elementKeyCount = await keyPairVerification?.count();
 
-    await page.locator('//*[@id="keypair1"]').click();
-    await page.locator('//*[@id="keypair1"]').fill("testtesttesttest1");
-    await page.locator('//*[@id="keypair101"]').click();
-    await page
-      .locator('//*[@id="keypair101"]')
-      .fill("testtesttesttesttesttest1");
-    await page.locator('//*[@id="plusbtn1"]').click();
+    if (elementKeyCount === 1) {
+      await page.getByText("Close").last().click();
 
-    await page.locator('//*[@id="keypair2"]').click();
-    await page.locator('//*[@id="keypair2"]').fill("testtesttesttest2");
-    await page.locator('//*[@id="keypair102"]').click();
-    await page
-      .locator('//*[@id="keypair102"]')
-      .fill("testtesttesttesttesttest2");
-
-    await page.locator('//*[@id="minusbtn1"]').click();
-
-    const keyPairVerification = page.locator('//*[@id="keypair102"]');
-    const elementKeyCount = await keyPairVerification.count();
-
-    if (elementKeyCount === 0) {
-      await page.locator('//*[@id="saveChangesBtn"]').click();
+      await page.getByTestId("div-generic-node").click();
 
       const key1 = await page.locator('//*[@id="keypair0"]').inputValue();
       const value1 = await page.locator('//*[@id="keypair100"]').inputValue();
-      const key2 = await page.locator('//*[@id="keypair1"]').inputValue();
-      const value2 = await page.locator('//*[@id="keypair101"]').inputValue();
+      await page.getByTestId("div-generic-node").click();
 
       if (
         key1 === "testtesttesttest" &&
-        value1 === "test test test test test test" &&
-        key2 === "testtesttesttest2" &&
-        value2 === "testtesttesttesttesttest2"
+        value1 === "test test test test test test"
       ) {
         expect(true).toBeTruthy();
       } else {
